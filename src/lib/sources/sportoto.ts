@@ -105,8 +105,127 @@ export function parseProgramHtml(html: string): Program {
   return { season, programNo, closesAt, matches, downloadUrl };
 }
 
+// ---------------------------------------------------------------- Resmî JSON API
+// sportoto.gov.tr/spor-toto-listeler sayfası tabloyu artık tarayıcıda, sitenin kendi
+// webapi.sportoto.gov.tr uç noktalarından doldurur (sunucu HTML'inde tablo boştur).
+// Aşağıdaki çağrılar sayfanın kendi yaptığı çağrıların aynısıdır.
+
+export const SPORTOTO_API_BASE = "https://webapi.sportoto.gov.tr/";
+
+interface ApiEnvelope<T> {
+  object: T;
+  isSucceed?: boolean;
+  message?: string | null;
+}
+export interface ApiGameRound {
+  id: number;
+  name: string; // "17. Oyun Programı"
+  year: string; // "2026/2027"
+  roundCloseDate: string | null; // Türkiye saati, saat dilimi eki yok
+  isPublished: boolean | null;
+  attachment?: { attachmentName?: string | null } | null;
+}
+export interface ApiGameMatch {
+  match: {
+    date: string; // "2026-11-24T20:45:00" (Türkiye saati)
+    fullTimeWin: number | null; // 1 / 0 (beraberlik) / 2
+    noterWin: number | null; // 1 = sonuç noter çekilişiyle belirlendi
+    score: { homeRegular: number | null; awayRegular: number | null } | null;
+    homeTeam: { name: string } | null;
+    awayTeam: { name: string } | null;
+  } | null;
+}
+
+/** Saat dilimi eki olmayan "YYYY-MM-DDTHH:mm:ss" (Türkiye saati) -> ISO UTC. */
+export function trLocalIsoToUtc(s: string): string | null {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m || m[1] === "0001") return null;
+  return trDateTimeToIso(`${m[3]}.${m[2]}.${m[1]}`, `${m[4]}:${m[5]}`);
+}
+
+export function programNoFromName(name: string): number | null {
+  const n = Number(name.match(/^\s*(\d{1,3})\.\s*Oyun Program/)?.[1]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Yayımlanmış programlar arasından en yüksek numaralı (en güncel) olanı seçer. */
+export function pickLatestRound(rounds: ApiGameRound[]): ApiGameRound {
+  const published = rounds.filter((r) => r.isPublished !== false && programNoFromName(r.name) !== null);
+  if (!published.length) throw new SourceError("error", "Resmî API'de yayımlanmış oyun programı bulunamadı");
+  return published.reduce((a, b) => (programNoFromName(b.name)! > programNoFromName(a.name)! ? b : a));
+}
+
+function apiOutcome(v: number | null | undefined): Outcome | null {
+  if (v === 1) return "1";
+  if (v === 0) return "X";
+  if (v === 2) return "2";
+  return null;
+}
+
+export function parseProgramApi(round: ApiGameRound, games: ApiGameMatch[]): Program {
+  const programNo = programNoFromName(round.name);
+  if (!round.year || !programNo) throw new SourceError("error", `Oyun programı adı/sezonu okunamadı: ${round.name}`);
+  const matches: ProgramMatch[] = [];
+  games.forEach((g, i) => {
+    const m = g.match;
+    const home = m?.homeTeam?.name?.trim();
+    const away = m?.awayTeam?.name?.trim();
+    const kickoff = m?.date ? trLocalIsoToUtc(m.date) : null;
+    if (!m || !home || !away || !kickoff) return;
+    const result = apiOutcome(m.fullTimeWin);
+    const s = m.score;
+    const score = s && s.homeRegular != null && s.awayRegular != null ? `${s.homeRegular}-${s.awayRegular}` : null;
+    // Sıra: resmî listede maçlar API'nin döndürdüğü sırayla numaralanır.
+    matches.push({ order: i + 1, home, away, kickoff, score, result });
+  });
+  if (games.length !== 15 || matches.length !== 15)
+    throw new SourceError("error", `Resmî listede 15 yerine ${matches.length} maç okunabildi`);
+  const att = round.attachment?.attachmentName;
+  return {
+    season: round.year,
+    programNo,
+    closesAt: round.roundCloseDate ? trLocalIsoToUtc(round.roundCloseDate) : null,
+    matches,
+    downloadUrl: att ? `${SPORTOTO_API_BASE}image/${att}` : null,
+  };
+}
+
+async function apiGet<T>(path: string): Promise<T> {
+  const { text } = await httpGet(SPORTOTO_API_BASE + path, { minGapMs: 1500, headers: { Accept: "application/json" } });
+  let env: ApiEnvelope<T>;
+  try {
+    env = JSON.parse(text) as ApiEnvelope<T>;
+  } catch {
+    throw new SourceError("error", `Resmî API geçersiz yanıt verdi: ${path}`);
+  }
+  if (env.isSucceed === false || env.object == null) throw new SourceError("error", `Resmî API başarısız: ${path} ${env.message ?? ""}`.trim());
+  return env.object;
+}
+
+export async function fetchProgramApi(): Promise<Program> {
+  const years = await apiGet<Array<{ year: string }>>("api/GameRound/GetGameRoundYears");
+  const season = years[0]?.year;
+  if (!season) throw new SourceError("error", "Resmî API'de sezon bulunamadı");
+  const rounds = await apiGet<ApiGameRound[]>(`api/GameRound?year=${encodeURIComponent(season)}&isPublished=true`);
+  const round = pickLatestRound(rounds);
+  const games = await apiGet<ApiGameMatch[]>(`api/GameMatch/GetGameMatches/?gameRoundId=${round.id}`);
+  return parseProgramApi(round, games);
+}
+
 export async function fetchProgram() {
-  const { text } = await httpGet(SPORTOTO_LIST_URL, { minGapMs: 3000 });
-  const program = parseProgramHtml(text);
-  return { program, prov: provenance("sportoto", SPORTOTO_LIST_URL, new Date()) };
+  let apiErr: Error | null = null;
+  try {
+    const program = await fetchProgramApi();
+    return { program, prov: provenance("sportoto", SPORTOTO_LIST_URL, new Date()) };
+  } catch (e) {
+    apiErr = e as Error;
+  }
+  // Yedek: sayfanın sunucu HTML'i (eski yapı). İkisi de başarısızsa iki hatayı birlikte bildir.
+  try {
+    const { text } = await httpGet(SPORTOTO_LIST_URL, { minGapMs: 3000 });
+    const program = parseProgramHtml(text);
+    return { program, prov: provenance("sportoto", SPORTOTO_LIST_URL, new Date()) };
+  } catch (e) {
+    throw new SourceError("error", `Resmî API: ${apiErr?.message}; HTML sayfası: ${(e as Error).message}`);
+  }
 }

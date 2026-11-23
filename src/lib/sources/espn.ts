@@ -88,6 +88,43 @@ async function teamHistory(league: string, teamId: string, teamName: string): Pr
   return { url, matches: out.sort((a, b) => b.date.localeCompare(a.date)) };
 }
 
+/** ESPN takım kaydındaki defaultLeague bağlantısından iç lig kodunu ("eng.1") çıkarır. */
+export function domesticLeagueSlug(team: { defaultLeague?: { links?: Array<{ href?: string }> } } | undefined): string | null {
+  for (const l of team?.defaultLeague?.links ?? []) {
+    const m = l.href?.match(/\/league\/_\/name\/([a-z]{3}\.\d)(?:[/?#]|$)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** Aynı maçın iki listede tekrarını eler, yeniden eskiye sıralar. */
+export function mergeHistories(...lists: TeamMatch[][]): TeamMatch[] {
+  const seen = new Map<string, TeamMatch>();
+  for (const m of lists.flat()) {
+    const k = `${m.date.slice(0, 10)}|${m.opponent.toLowerCase()}`;
+    if (!seen.has(k)) seen.set(k, m);
+  }
+  return [...seen.values()].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+/**
+ * Takımın maç geçmişi. Avrupa kupası maçlarında kupa takviminde takım başına yalnızca birkaç maç olur;
+ * bu durumda takımın ESPN'deki iç lig maçları da (gerçek, tamamlanmış maçlar) eklenir. Hazırlık maçları alınmaz.
+ */
+async function teamHistoryWithDomestic(league: string, teamId: string, teamName: string): Promise<{ url: string; matches: TeamMatch[] }> {
+  const cup = await teamHistory(league, teamId, teamName);
+  if (!league.startsWith("uefa.")) return cup;
+  try {
+    const info = await httpJson<{ team?: { defaultLeague?: { links?: Array<{ href?: string }> } } }>(`${BASE}/${league}/teams/${teamId}`, { minGapMs: 400 });
+    const dom = domesticLeagueSlug(info.team);
+    if (!dom || dom === league) return cup;
+    const domestic = await teamHistory(dom, teamId, teamName);
+    return { url: domestic.url, matches: mergeHistories(cup.matches, domestic.matches) };
+  } catch {
+    return cup; // İç lig verisi alınamazsa yalnızca kupa maçları kullanılır (uydurma yok).
+  }
+}
+
 export const espnAdapter: Adapter = {
   id: "espn",
   applies: () => true,
@@ -99,8 +136,8 @@ export const espnAdapter: Adapter = {
     const asOf = new Date(Math.min(ctx.kickoff.getTime(), Date.now()));
     const res: AdapterResult = { sourceId: "espn", status: "ok", url, summary: `${found.event.name ?? ""} (${found.league})` };
     const [hh, ah] = await Promise.allSettled([
-      teamHistory(found.league, found.home.team.id, found.home.team.displayName),
-      teamHistory(found.league, found.away.team.id, found.away.team.displayName),
+      teamHistoryWithDomestic(found.league, found.home.team.id, found.home.team.displayName),
+      teamHistoryWithDomestic(found.league, found.away.team.id, found.away.team.displayName),
     ]);
     if (hh.status === "fulfilled" && hh.value.matches.length)
       res.homeStats = { matches: hh.value.matches, stats: computeTeamStats(hh.value.matches, asOf), prov: provenance("espn", hh.value.url, hh.value.matches[0].date) };

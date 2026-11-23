@@ -20,8 +20,14 @@ interface UnderstatTeam {
 
 const cache = new Map<string, { at: number; teams: UnderstatTeam[] }>();
 
+/** Understat bakım/hata sayfası ("We will come back soon") mı? */
+export function isMaintenancePage(html: string): boolean {
+  return /come back soon/i.test(html) || /<link[^>]+errors\.css/i.test(html);
+}
+
 /** Understat sayfasındaki `teamsData = JSON.parse('...')` bloğunu çözer. */
 export function parseTeamsData(html: string): UnderstatTeam[] {
+  if (isMaintenancePage(html)) throw new SourceError("error", "Understat bakımda / geçici olarak kapalı (\"We will come back soon\")");
   const m = html.match(/teamsData\s*=\s*JSON\.parse\('([^']+)'\)/);
   if (!m) throw new SourceError("error", "teamsData bulunamadı");
   const decoded = m[1].replace(/\\x([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
@@ -37,13 +43,21 @@ async function leagueTeams(league: string, season: number): Promise<{ url: strin
   try {
     const { text } = await httpGet(url, { minGapMs: 3000 });
     teams = parseTeamsData(text);
-  } catch {
+  } catch (first) {
+    // Site bakımdaysa veya hiç erişilemiyorsa ikinci uç noktayı denemenin anlamı yok.
+    if (first instanceof SourceError && /bakımda|erişilemedi|zaman aşımı/.test(first.message)) throw first;
     // Yeni sürümde veri ayrı bir JSON uç noktasından geliyor olabilir.
     const { text } = await httpGet(`https://understat.com/getLeagueData/${league}/${season}`, {
       minGapMs: 3000,
       headers: { "X-Requested-With": "XMLHttpRequest", Referer: url },
     });
-    const j = JSON.parse(text) as { teams?: Record<string, UnderstatTeam> };
+    if (isMaintenancePage(text)) throw new SourceError("error", "Understat bakımda / geçici olarak kapalı (\"We will come back soon\")");
+    let j: { teams?: Record<string, UnderstatTeam> };
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw new SourceError("error", "Understat yanıtı JSON değil (sayfa yapısı değişmiş olabilir)");
+    }
     if (!j.teams) throw new SourceError("error", "Understat yanıtı beklenen biçimde değil");
     teams = Object.values(j.teams);
   }
