@@ -1,0 +1,178 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Bir Spor Toto oyun programı (haftası).
+model Week {
+  id        String               @id @default(cuid())
+  season    String // "2026/2027"
+  programNo Int
+  closesAt  DateTime?
+  sourceUrl String
+  fetchedAt DateTime
+  createdAt DateTime             @default(now())
+  matches   Match[]
+  coupons   Coupon[]
+  snapshots PredictionSnapshot[]
+
+  @@unique([season, programNo])
+}
+
+model Match {
+  id           String               @id @default(cuid())
+  weekId       String
+  week         Week                 @relation(fields: [weekId], references: [id])
+  order        Int // 1..15
+  homeName     String // resmî listedeki ad
+  awayName     String
+  kickoff      DateTime
+  competition  String?
+  /// Sonuç: "1" | "X" | "2" (normal süre). null = henüz yok.
+  result       String?
+  score        String?
+  resultSource String?
+  resultAt     DateTime?
+  analysis     Analysis?
+  snapshots    PredictionSnapshot[]
+  experts      ExpertPick[]
+  fetches      SourceFetch[]
+  notices      ChangeNotice[]
+
+  @@unique([weekId, order])
+}
+
+/// Kaynaklardan yapılan her çekimin künyesi (kaynak, bağlantı, alınma ve güncellik tarihi, durum).
+model SourceFetch {
+  id        String    @id @default(cuid())
+  sourceId  String
+  url       String
+  fetchedAt DateTime  @default(now())
+  dataAsOf  DateTime?
+  status    String // ok | empty | error | missing_key | unavailable | not_applicable
+  error     String?
+  matchId   String?
+  match     Match?    @relation(fields: [matchId], references: [id])
+  payload   Json?
+
+  @@index([matchId, sourceId])
+  @@index([sourceId, fetchedAt])
+}
+
+/// Maçın en güncel analizi (değişebilir). Tarihli, değiştirilemez kopyası PredictionSnapshot'tadır.
+model Analysis {
+  matchId   String   @id
+  match     Match    @relation(fields: [matchId], references: [id])
+  updatedAt DateTime @updatedAt
+  evidence  Json
+  decision  Json
+  riskFlags Json
+  weights   Json
+}
+
+/// DEĞİŞTİRİLEMEZ tahmin kaydı. UPDATE/DELETE veritabanı tetikleyicisiyle engellenir; maç başladıktan sonra kayıt eklenemez.
+model PredictionSnapshot {
+  id        String   @id @default(cuid())
+  seq       Int      @unique @default(autoincrement())
+  weekId    String
+  week      Week     @relation(fields: [weekId], references: [id])
+  matchId   String
+  match     Match    @relation(fields: [matchId], references: [id])
+  createdAt DateTime @default(now())
+  stage     String // fikstur | T-24 | T-3 | T-1 | haber | manuel
+  payload   Json
+  prevHash  String?
+  hash      String   @unique
+
+  @@index([matchId, createdAt])
+}
+
+model ChangeNotice {
+  id        String   @id @default(cuid())
+  matchId   String
+  match     Match    @relation(fields: [matchId], references: [id])
+  createdAt DateTime @default(now())
+  reason    String
+  summary   String
+  before    Json?
+  after     Json
+  read      Boolean  @default(false)
+}
+
+model ExpertPick {
+  id          String    @id @default(cuid())
+  matchId     String
+  match       Match     @relation(fields: [matchId], references: [id])
+  sourceName  String
+  author      String?
+  url         String
+  pick        String
+  publishedAt DateTime?
+  fetchedAt   DateTime  @default(now())
+  originKey   String
+  enteredBy   String    @default("otomatik") // otomatik | manuel
+
+  @@unique([matchId, url, sourceName])
+}
+
+model NewsItem {
+  id          String    @id @default(cuid())
+  sourceId    String
+  title       String
+  url         String    @unique
+  publishedAt DateTime?
+  fetchedAt   DateTime  @default(now())
+  teams       String[]
+  kind        String // sakatlik | kadro | genel
+}
+
+model Coupon {
+  id          String   @id @default(cuid())
+  weekId      String
+  week        Week     @relation(fields: [weekId], references: [id])
+  name        String
+  kind        String // ekonomik | dengeli | genis | butce-100 | manuel ...
+  picks       Json // Pick[15]
+  columns     Int
+  columnPrice Decimal  @db.Decimal(10, 2)
+  cost        Decimal  @db.Decimal(12, 2)
+  origin      String   @default("otomatik") // otomatik | manuel
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  source    String? // bağlantı veya "manuel"
+  verified  Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+model TeamAlias {
+  alias     String   @id // normalize edilmiş ad (ör. "bayern munih")
+  canonical String // İngilizce/uluslararası ad (ör. "Bayern Munich")
+  clubElo   String? // ClubElo takım adı (ör. "Bayern")
+  createdAt DateTime @default(now())
+}
+
+model ModelWeights {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  weights   Json
+  samples   Json
+  avgLoss   Json
+}
+
+model JobRun {
+  id         String    @id @default(cuid())
+  job        String
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  status     String    @default("calisiyor")
+  detail     String?
+}
