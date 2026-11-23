@@ -1,10 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { parseProgramHtml, trDateTimeToIso } from "@/lib/sources/sportoto";
+import {
+  parseProgramApi,
+  parseProgramHtml,
+  pickLatestRound,
+  programNoFromName,
+  trDateTimeToIso,
+  trLocalIsoToUtc,
+  type ApiGameMatch,
+  type ApiGameRound,
+} from "@/lib/sources/sportoto";
 import { fixtureRowToProbs } from "@/lib/sources/clubelo";
 import { parseCsv } from "@/lib/sources/http";
 import { extractPicksFromText, parseFeed, parsePickToken, stripHtml } from "@/lib/sources/rss";
 import { fdDate, seasonCode, oddsFromRow } from "@/lib/sources/footballdataCoUk";
-import { parseTeamsData } from "@/lib/sources/understat";
+import { isMaintenancePage, parseTeamsData } from "@/lib/sources/understat";
+import { isNetworkError, networkErrorMessage, SourceError } from "@/lib/sources/http";
+import { domesticLeagueSlug, mergeHistories } from "@/lib/sources/espn";
 import { normalizeName, resolveTeam, similarity, bestMatch } from "@/lib/data/teams";
 import { computeTeamStats } from "@/lib/data/stats";
 
@@ -56,6 +67,74 @@ describe("resmî Spor Toto listesi", () => {
   });
   it("Türkiye saati UTC+3", () => {
     expect(trDateTimeToIso("01.01.2027", "00:30")).toBe("2026-12-31T21:30:00.000Z");
+  });
+});
+
+// webapi.sportoto.gov.tr yanıtlarıyla aynı yapı (api/GameRound ve api/GameMatch/GetGameMatches).
+const apiRound = (over: Partial<ApiGameRound> = {}): ApiGameRound => ({
+  id: 1542,
+  name: "15. Oyun Programı",
+  year: "2026/2027",
+  roundCloseDate: "2026-11-13T22:40:00",
+  isPublished: true,
+  attachment: { attachmentName: "liste-15.jpg" },
+  ...over,
+});
+const apiGames = (result: (i: number) => [number | null, number | null, number | null]): ApiGameMatch[] =>
+  MATCHES.map(([t, d, h], i) => {
+    const [home, away] = t.split(" - ");
+    const [dd, mm, yyyy] = d.slice(0, 10).split(".");
+    const [fullTimeWin, hg, ag] = result(i);
+    return {
+      match: {
+        date: `${yyyy}-${mm}-${dd}T${h}:00`,
+        fullTimeWin,
+        noterWin: 0,
+        score: hg == null ? null : { homeRegular: hg, awayRegular: ag },
+        homeTeam: { name: home },
+        awayTeam: { name: away },
+      },
+    };
+  });
+
+describe("resmî Spor Toto JSON API", () => {
+  it("15 maçı, sezonu, program no, kapanışı ve liste görselini okur", () => {
+    const p = parseProgramApi(apiRound(), apiGames(() => [null, null, null]));
+    expect(p.season).toBe("2026/2027");
+    expect(p.programNo).toBe(15);
+    expect(p.matches).toHaveLength(15);
+    expect(p.matches[0]).toMatchObject({ order: 1, home: "Fransa", away: "Türkiye", result: null, score: null });
+    expect(p.matches[0].kickoff).toBe("2026-11-15T19:45:00.000Z");
+    expect(p.matches[12].home).toBe("Kuzey Makedonya Cumhuriyeti");
+    expect(p.closesAt).toBe("2026-11-13T19:40:00.000Z");
+    expect(p.downloadUrl).toBe("https://webapi.sportoto.gov.tr/image/liste-15.jpg");
+  });
+  it("sonuçları okur (fullTimeWin: 1 / 0 = beraberlik / 2)", () => {
+    const p = parseProgramApi(apiRound(), apiGames((i) => (i === 0 ? [1, 2, 1] : i === 1 ? [0, 1, 1] : [2, 0, 2])));
+    expect(p.matches[0]).toMatchObject({ score: "2-1", result: "1" });
+    expect(p.matches[1]).toMatchObject({ score: "1-1", result: "X" });
+    expect(p.matches[2].result).toBe("2");
+  });
+  it("eksik listede hata verir (uydurmaz)", () => {
+    expect(() => parseProgramApi(apiRound(), apiGames(() => [null, null, null]).slice(0, 14))).toThrow(/15 yerine 14/);
+    const broken = apiGames(() => [null, null, null]);
+    broken[3] = { match: null };
+    expect(() => parseProgramApi(apiRound(), broken)).toThrow(/15 yerine 14/);
+  });
+  it("en yüksek numaralı yayımlanmış programı seçer (API sırası karışık)", () => {
+    const rounds = [
+      apiRound({ id: 1536, name: "9. Oyun Programı" }),
+      apiRound({ id: 1544, name: "17. Oyun Programı" }),
+      apiRound({ id: 1545, name: "18. Oyun Programı", isPublished: false }),
+      apiRound({ id: 1528, name: "1. Oyun Programı" }),
+    ];
+    expect(pickLatestRound(rounds).id).toBe(1544);
+    expect(() => pickLatestRound([])).toThrow();
+  });
+  it("saat dilimi eksiz Türkiye saatini UTC'ye çevirir, boş tarihi reddeder", () => {
+    expect(trLocalIsoToUtc("2026-11-24T20:45:00")).toBe("2026-11-24T17:45:00.000Z");
+    expect(trLocalIsoToUtc("0001-01-01T00:00:00")).toBeNull();
+    expect(programNoFromName("17. Oyun Programı")).toBe(17);
   });
 });
 
@@ -130,6 +209,38 @@ describe("Understat", () => {
     const data = JSON.stringify({ "1": { id: "1", title: "Arsenal", history: [{ h_a: "h", xG: 2.1, xGA: 0.5, scored: 2, missed: 0, date: "2026-11-01 15:00:00" }] } });
     const esc = data.replace(/"/g, "\\x22");
     expect(parseTeamsData(`<script>var teamsData = JSON.parse('${esc}');</script>`)[0].title).toBe("Arsenal");
+  });
+  it("bakım sayfasını açıkça bildirir", () => {
+    const page = `<!DOCTYPE html><html><head><title>Understat.com</title><link href="/css/errors.css" rel="stylesheet"></head><body><h1>We will come back soon</h1></body></html>`;
+    expect(isMaintenancePage(page)).toBe(true);
+    expect(() => parseTeamsData(page)).toThrow(/bakımda/);
+  });
+});
+
+describe("ESPN iç lig takviyesi", () => {
+  it("defaultLeague bağlantısından lig kodunu okur", () => {
+    expect(domesticLeagueSlug({ defaultLeague: { links: [{ href: "https://www.espn.com/soccer/league/_/name/eng.1" }] } })).toBe("eng.1");
+    expect(domesticLeagueSlug({ defaultLeague: { links: [{ href: "https://www.espn.com/soccer/league/_/name/tur.1/turkish-super-lig" }] } })).toBe("tur.1");
+    expect(domesticLeagueSlug({})).toBeNull();
+    expect(domesticLeagueSlug(undefined)).toBeNull();
+  });
+  it("kupa ve lig maçlarını tekrar etmeden birleştirir", () => {
+    const m = (date: string, opponent: string, competition: string) => ({ date, opponent, competition, home: true, gf: 1, ga: 0 });
+    const out = mergeHistories(
+      [m("2026-11-05T20:00Z", "Napoli", "UEFA Champions League"), m("2026-10-21T19:00Z", "Ajax", "UEFA Champions League")],
+      [m("2026-11-21T17:30Z", "Newcastle United", "Premier League"), m("2026-11-05T20:00Z", "napoli", "UEFA Champions League")],
+    );
+    expect(out.map((x) => x.opponent)).toEqual(["Newcastle United", "Napoli", "Ajax"]);
+  });
+});
+
+describe("ağ hatası mesajları", () => {
+  it("'fetch failed' yerine sunucu ve neden", () => {
+    const err = Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_CONNECT_TIMEOUT" } });
+    expect(networkErrorMessage("api.clubelo.com", err)).toBe("api.clubelo.com erişilemedi (UND_ERR_CONNECT_TIMEOUT)");
+    expect(networkErrorMessage("x.com", Object.assign(new Error("aborted"), { name: "AbortError" }))).toMatch(/zaman aşımı/);
+    expect(isNetworkError(new SourceError("error", "www.football-data.co.uk erişilemedi (ECONNRESET)"))).toBe(true);
+    expect(isNetworkError(new SourceError("error", "HTTP 404: not found"))).toBe(false);
   });
 });
 

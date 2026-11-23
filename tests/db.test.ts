@@ -1,11 +1,15 @@
 /**
- * Veritabanı tetikleyicilerinin gerçekten çalıştığını doğrular (DATABASE_URL gerekli; yoksa atlanır).
+ * Veritabanı tetikleyicilerinin gerçekten çalıştığını doğrular.
+ * Ayrı bir test veritabanı gerekir (TEST_DATABASE_URL); yoksa atlanır.
+ * Uygulamanın DATABASE_URL'ü ve boş olması gereken E2E veritabanı bilerek kullanılmaz: bu test silinemeyen
+ * "test-…" haftaları yazar ve bunlar sıralamada gerçek sezonların önüne geçip güncel hafta olarak görünürdü.
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
 
-const hasDb = !!process.env.DATABASE_URL;
-const prisma = hasDb ? new PrismaClient() : (null as unknown as PrismaClient);
+const testDbUrl = process.env.TEST_DATABASE_URL;
+const hasDb = !!testDbUrl;
+const prisma = hasDb ? new PrismaClient({ datasourceUrl: testDbUrl }) : (null as unknown as PrismaClient);
 
 describe.skipIf(!hasDb)("değiştirilemez tahmin kaydı (PostgreSQL)", () => {
   afterAll(async () => prisma?.$disconnect());

@@ -1,7 +1,7 @@
 import { bestMatch, similarity } from "../data/teams";
 import { computeTeamStats, type H2HMatch, type TeamMatch } from "../data/stats";
 import type { OddsEvidence } from "../model/engines";
-import { httpGet, parseCsv, provenance } from "./http";
+import { httpGet, isNetworkError, parseCsv, provenance, SourceError } from "./http";
 import type { Adapter, AdapterResult, MatchContext } from "./types";
 
 const BASE = "https://www.football-data.co.uk";
@@ -44,10 +44,19 @@ export function fdDate(date: string, time?: string): string {
 }
 
 const csvCache = new Map<string, { at: number; rows: Array<Record<string, string>> }>();
+/** Site ağ düzeyinde erişilemezse her maç ve lig için tekrar tekrar zaman aşımı beklememek için. */
+let unreachable: { at: number; error: string } | null = null;
 async function csv(url: string, ttlMs = 3 * 3600000) {
   const c = csvCache.get(url);
   if (c && Date.now() - c.at < ttlMs) return c.rows;
-  const { text } = await httpGet(url, { minGapMs: 1500 });
+  if (unreachable && Date.now() - unreachable.at < 10 * 60000) throw new SourceError("error", unreachable.error);
+  let text: string;
+  try {
+    ({ text } = await httpGet(url, { minGapMs: 1500 }));
+  } catch (e) {
+    if (isNetworkError(e)) unreachable = { at: Date.now(), error: (e as Error).message };
+    throw e;
+  }
   const rows = parseCsv(text);
   csvCache.set(url, { at: Date.now(), rows });
   return rows;
@@ -118,7 +127,9 @@ export const footballDataCoUkAdapter: Adapter = {
       let r: Array<Record<string, string>>;
       try {
         r = await csv(`${BASE}/mmz4281/${code}/${d}.csv`);
-      } catch {
+      } catch (e) {
+        // Site hiç erişilemiyorsa bunu "takım bulunamadı" diye göstermeyiz: kaynak hatası olarak bildirilir.
+        if (isNetworkError(e)) throw e;
         continue;
       }
       const h = findTeam(r, ctx.home.english, ctx.home.input);

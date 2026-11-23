@@ -55,7 +55,22 @@ export async function httpGet(
       clearTimeout(t);
     }
   }
-  throw lastErr instanceof Error ? new SourceError("error", lastErr.message) : new SourceError("error", String(lastErr));
+  if (lastErr instanceof SourceError) throw lastErr;
+  throw new SourceError("error", networkErrorMessage(host, lastErr));
+}
+
+/** "fetch failed" yerine hangi sunucuya neden ulaşılamadığını söyler. */
+export function networkErrorMessage(host: string, err: unknown): string {
+  const e = err as { name?: string; message?: string; cause?: { code?: string; message?: string } } | null;
+  if (e?.name === "AbortError") return `${host} zaman aşımı (yanıt gelmedi)`;
+  const code = e?.cause?.code ?? e?.cause?.message;
+  if (code) return `${host} erişilemedi (${code})`;
+  return `${host}: ${e?.message ?? String(err)}`;
+}
+
+/** Ağ düzeyinde erişim hatası mı (HTTP yanıtı hiç alınamadı)? */
+export function isNetworkError(e: unknown): boolean {
+  return e instanceof SourceError && /erişilemedi|zaman aşımı/.test(e.message);
 }
 
 export async function httpJson<T>(url: string, opts?: Parameters<typeof httpGet>[1]): Promise<T> {

@@ -105,7 +105,7 @@ oynarsa “Tahmin değişiklik bildirimi” oluşturulur.
 ## Testler
 
 ```bash
-npm test                                   # birim testleri (DB testleri DATABASE_URL varsa çalışır)
+npm test                                   # birim testleri (DB tetikleyici testi yalnızca TEST_DATABASE_URL ile, ayrı veritabanında çalışır)
 createdb spor_toto_e2e && DATABASE_URL=postgresql://…/spor_toto_e2e npm run db:migrate
 E2E_DATABASE_URL=postgresql://…/spor_toto_e2e npm run test:e2e   # uçtan uca hat (sahte ağ yanıtlarıyla)
 ```
