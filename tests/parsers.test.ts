@@ -16,6 +16,7 @@ import { fdDate, seasonCode, oddsFromRow } from "@/lib/sources/footballdataCoUk"
 import { isMaintenancePage, parseTeamsData } from "@/lib/sources/understat";
 import { isNetworkError, networkErrorMessage, SourceError } from "@/lib/sources/http";
 import { domesticLeagueSlug, mergeHistories } from "@/lib/sources/espn";
+import { fdoListUrl } from "@/lib/sources/keyed";
 import { normalizeName, resolveTeam, similarity, bestMatch } from "@/lib/data/teams";
 import { computeTeamStats } from "@/lib/data/stats";
 
@@ -231,6 +232,13 @@ describe("ESPN iç lig takviyesi", () => {
       [m("2026-11-21T17:30Z", "Newcastle United", "Premier League"), m("2026-11-05T20:00Z", "napoli", "UEFA Champions League")],
     );
     expect(out.map((x) => x.opponent)).toEqual(["Newcastle United", "Napoli", "Ajax"]);
+  });
+});
+
+describe("football-data.org", () => {
+  it("dateTo hariç olduğu için aralığı ertesi güne kadar ister", () => {
+    expect(fdoListUrl("2026-11-24")).toBe("https://api.football-data.org/v4/matches?dateFrom=2026-11-24&dateTo=2026-11-25");
+    expect(fdoListUrl("2026-12-31")).toBe("https://api.football-data.org/v4/matches?dateFrom=2026-12-31&dateTo=2027-01-01");
   });
 });
 
