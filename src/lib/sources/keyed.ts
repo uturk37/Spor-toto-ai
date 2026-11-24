@@ -127,13 +127,23 @@ interface FdoMatch {
 }
 const fdoCache = new Map<string, { at: number; list: FdoMatch[] }>();
 
+/**
+ * football-data.org'da dateTo hariç tutulur: dateFrom=dateTo=gün yalnızca 00:00'daki maçları döndürür.
+ * Bu yüzden aralık ertesi güne kadar istenir, maçlar sonra güne göre süzülür.
+ */
+export function fdoListUrl(day: string): string {
+  const next = new Date(`${day}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return `${FDO}/matches?dateFrom=${day}&dateTo=${next.toISOString().slice(0, 10)}`;
+}
+
 export const footballDataOrgAdapter: Adapter = {
   id: "football_data_org",
   applies: () => true,
   async collect(ctx: MatchContext): Promise<AdapterResult> {
     const key = requireKey("FOOTBALL_DATA_ORG_KEY");
     const day = ctx.kickoff.toISOString().slice(0, 10);
-    const listUrl = `${FDO}/matches?dateFrom=${day}&dateTo=${day}`;
+    const listUrl = fdoListUrl(day);
     let c = fdoCache.get(day);
     if (!c || Date.now() - c.at > 3600000) {
       const j = await httpJson<{ matches: FdoMatch[] }>(listUrl, { headers: { "X-Auth-Token": key }, minGapMs: 6500 });
@@ -142,6 +152,7 @@ export const footballDataOrgAdapter: Adapter = {
     }
     const m = c.list.find(
       (x) =>
+        x.utcDate.slice(0, 10) === day &&
         Math.max(similarity(x.homeTeam.name, ctx.home.english), similarity(x.homeTeam.shortName ?? "", ctx.home.english)) >= 0.75 &&
         Math.max(similarity(x.awayTeam.name, ctx.away.english), similarity(x.awayTeam.shortName ?? "", ctx.away.english)) >= 0.75,
     );
